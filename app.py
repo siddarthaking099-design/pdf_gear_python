@@ -508,47 +508,100 @@ class PDFProcessor:
             raise Exception(f"Error compressing PDF: {str(e)}")
     
     @staticmethod
-    def unlock_pdf(pdf_file, password):
-        """Remove password protection from PDF"""
+    def unlock_pdf(pdf_file, password=""):
+        """Advanced PDF password removal with multiple attack methods"""
         try:
-            pdf_file.seek(0)
+            import tempfile
+            import itertools
             
-            # Try PyMuPDF first
-            try:
-                pdf_bytes = pdf_file.read()
-                pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
-                
-                if pdf_document.needs_pass:
-                    if not pdf_document.authenticate(password):
-                        pdf_document.close()
-                        raise Exception("Invalid password")
-                
-                output = io.BytesIO()
-                pdf_document.save(output)
-                pdf_document.close()
-                output.seek(0)
-                return output
-                
-            except Exception:
-                # Fallback to PyPDF2
+            # Save uploaded file to temp location
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_pdf:
                 pdf_file.seek(0)
-                pdf_reader = PyPDF2.PdfReader(pdf_file)
+                temp_pdf.write(pdf_file.read())
+                temp_pdf_path = temp_pdf.name
+            
+            # Try pikepdf first (more reliable)
+            try:
+                import pikepdf
                 
-                if pdf_reader.is_encrypted:
-                    if not pdf_reader.decrypt(password):
-                        raise Exception("Invalid password")
+                # If password provided, try it first
+                if password:
+                    try:
+                        with pikepdf.open(temp_pdf_path, password=password) as pdf:
+                            output = io.BytesIO()
+                            pdf.save(output)
+                            output.seek(0)
+                            return output
+                    except:
+                        pass
                 
-                writer = PyPDF2.PdfWriter()
-                for page in pdf_reader.pages:
-                    writer.add_page(page)
+                # Common passwords to try
+                common_passwords = [
+                    "", "password", "123456", "123456789", "qwerty", "abc123",
+                    "password1", "12345", "12345678", "admin", "owner", "user",
+                    "pdf", "unlock", "open", "read", "view", "print"
+                ]
                 
-                output = io.BytesIO()
-                writer.write(output)
-                output.seek(0)
-                return output
+                # Try common passwords
+                for pwd in common_passwords:
+                    try:
+                        with pikepdf.open(temp_pdf_path, password=pwd) as pdf:
+                            output = io.BytesIO()
+                            pdf.save(output)
+                            output.seek(0)
+                            return output
+                    except:
+                        continue
                 
+                # Quick brute force for short numeric passwords
+                for length in range(1, 5):
+                    for combo in itertools.product('0123456789', repeat=length):
+                        pwd = ''.join(combo)
+                        try:
+                            with pikepdf.open(temp_pdf_path, password=pwd) as pdf:
+                                output = io.BytesIO()
+                                pdf.save(output)
+                                output.seek(0)
+                                return output
+                        except:
+                            continue
+                
+            except ImportError:
+                # Fallback to PyMuPDF/PyPDF2 if pikepdf not available
+                pass
+            
+            # Fallback to existing method
+            pdf_file.seek(0)
+            pdf_bytes = pdf_file.read()
+            pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+            
+            if pdf_document.needs_pass:
+                if password and pdf_document.authenticate(password):
+                    output = io.BytesIO()
+                    pdf_document.save(output)
+                    pdf_document.close()
+                    output.seek(0)
+                    return output
+                else:
+                    pdf_document.close()
+                    raise Exception("Could not unlock PDF with provided password or common passwords")
+            
+            # PDF is not password protected
+            output = io.BytesIO()
+            pdf_document.save(output)
+            pdf_document.close()
+            output.seek(0)
+            return output
+            
         except Exception as e:
             raise Exception(f"Error unlocking PDF: {str(e)}")
+        finally:
+            # Cleanup temp file
+            try:
+                import os
+                os.unlink(temp_pdf_path)
+            except:
+                pass
     
     @staticmethod
     def protect_pdf(pdf_file, password, owner_password=None):
@@ -854,9 +907,6 @@ def unlock_pdf():
         file = request.files['file']
         password = request.form.get('password', '').strip()
         
-        if not password:
-            return jsonify({'error': 'Password is required to unlock PDF'}), 400
-        
         result = PDFProcessor.unlock_pdf(file, password)
         return send_file(result, as_attachment=True, download_name='unlocked.pdf', 
                         mimetype='application/pdf')
@@ -905,13 +955,5 @@ def status():
 
 if __name__ == '__main__':
     import os
-    
-    # Production configuration
-    if os.environ.get('FLASK_ENV') == 'production':
-        # Use Waitress for Windows production deployment
-        from waitress import serve
-        print("Starting PDF Gears in production mode with Waitress...")
-        serve(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-    else:
-        # Development mode
-        app.run(debug=True, port=5000, host='0.0.0.0')
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
